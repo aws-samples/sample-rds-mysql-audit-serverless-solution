@@ -29,6 +29,7 @@ from aws_cdk import (
     aws_sqs as sqs,
 )
 from constructs import Construct
+from cdk_nag import NagSuppressions
 
 
 class RDSAuditSolutionStack(Stack):
@@ -73,6 +74,9 @@ class RDSAuditSolutionStack(Stack):
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.RETAIN,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
             time_to_live_attribute="expiration_time",
         )
 
@@ -96,7 +100,7 @@ class RDSAuditSolutionStack(Stack):
         worker_fn = _lambda.Function(
             self, "AuditLogRetriever",
             function_name="rds-audit-log-retriever",
-            runtime=_lambda.Runtime.PYTHON_3_12,
+            runtime=_lambda.Runtime.PYTHON_3_14,
             architecture=_lambda.Architecture.ARM_64,
             handler="index.lambda_handler",
             code=_lambda.Code.from_asset(lambda_code_path),
@@ -169,7 +173,7 @@ class RDSAuditSolutionStack(Stack):
         dispatcher_fn = _lambda.Function(
             self, "AuditLogDispatcher",
             function_name="rds-audit-log-dispatcher",
-            runtime=_lambda.Runtime.PYTHON_3_12,
+            runtime=_lambda.Runtime.PYTHON_3_14,
             architecture=_lambda.Architecture.ARM_64,
             handler="dispatcher.lambda_handler",
             code=_lambda.Code.from_asset(lambda_code_path),
@@ -201,9 +205,10 @@ class RDSAuditSolutionStack(Stack):
             schedule=events.Schedule.rate(Duration.minutes(dispatcher_schedule_minutes)),
             description=f"Trigger audit log dispatcher every {dispatcher_schedule_minutes} minutes",
         )
+        dispatcher_dlq = sqs.Queue(self, "DispatcherDLQ", enforce_ssl=True)
         rule.add_target(targets.LambdaFunction(
             dispatcher_fn,
-            dead_letter_queue=sqs.Queue(self, "DispatcherDLQ"),
+            dead_letter_queue=dispatcher_dlq,
             max_event_age=Duration.minutes(5),
             retry_attempts=2,
         ))
@@ -221,7 +226,7 @@ class RDSAuditSolutionStack(Stack):
         discovery_fn = _lambda.Function(
             self, "ClusterDiscovery",
             function_name="rds-audit-cluster-discovery",
-            runtime=_lambda.Runtime.PYTHON_3_12,
+            runtime=_lambda.Runtime.PYTHON_3_14,
             architecture=_lambda.Architecture.ARM_64,
             handler="cluster_discovery.lambda_handler",
             code=_lambda.Code.from_asset(lambda_code_path),
@@ -458,3 +463,16 @@ class RDSAuditSolutionStack(Stack):
 
         cdk.CfnOutput(self, "GlueDatabaseName", value=glue_database_name)
         cdk.CfnOutput(self, "GlueTableName", value=glue_table_name)
+
+        # ── cdk-nag Suppressions ──────────────────────────────────────────
+        NagSuppressions.add_resource_suppressions(
+            dispatcher_dlq,
+            [{"id": "AwsSolutions-SQS3", "reason": "This queue IS the DLQ for EventBridge target; a nested DLQ is unnecessary."}],
+        )
+        for fn in [worker_fn, dispatcher_fn, discovery_fn]:
+            NagSuppressions.add_resource_suppressions(
+                fn,
+                [{"id": "AwsSolutions-IAM4", "reason": "AWSLambdaBasicExecutionRole is the standard managed policy auto-attached by CDK for CloudWatch Logs access."},
+                 {"id": "AwsSolutions-IAM5", "reason": "Wildcard resources required: RDS instance/cluster IDs are dynamic (auto-discovered), S3 audit-log paths include date partitions, and Lambda invoke ARN requires :* suffix."}],
+                apply_to_children=True,
+            )
