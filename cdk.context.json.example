@@ -12,5 +12,5 @@
   "glue_database_name": "rds_audit_logs",
   "glue_table_name": "audit_logs",
   "target_rds_type": "aurora-mysql",
-  "region": "us-west-1"
+  "region": "your-deployed-region"
 }

@@ -12,3 +12,11 @@ cdk.out/
 
 # Build artifacts
 *.zip
+
+# Sensitvie information
+cdk.context.json
+.env
+*.pem
+*.key
+.aws/
+.claude/

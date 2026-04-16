@@ -15,9 +15,48 @@ Supports two invocation modes:
 Supports multipart upload for large log files (>5MB).
 """
 import boto3
+import logging
 import os
 import json
+import re
 from datetime import datetime, timedelta
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# RDS identifiers: letters, digits, hyphens only (no slashes or dots)
+_SAFE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9\-]{0,62}$')
+
+
+def _validate_rds_id(value: str, label: str) -> str:
+    """Validate cluster_id / instance_id used in S3 key construction.
+
+    Allows only RDS-legal identifier characters (alphanumeric + hyphen).
+    Raises ValueError on any suspicious value.
+    """
+    if not _SAFE_ID_RE.match(value):
+        raise ValueError(
+            f"Rejected unsafe value for '{label}': {value!r}. "
+            "Only alphanumeric characters and hyphens are allowed."
+        )
+    return value
+
+
+def _validate_log_filename(value: str) -> str:
+    """Validate log_filename used in S3 key construction.
+
+    Allows path separators (e.g. 'audit/server_audit.log') but rejects
+    '..' components, absolute paths, and null bytes to prevent traversal.
+    """
+    if not value or not isinstance(value, str):
+        raise ValueError("log_filename must be a non-empty string")
+    if "\x00" in value:
+        raise ValueError(f"Rejected log_filename with null byte: {value!r}")
+    if value.startswith("/"):
+        raise ValueError(f"Rejected absolute log_filename: {value!r}")
+    if any(part == ".." for part in value.replace("\\", "/").split("/")):
+        raise ValueError(f"Rejected log_filename with path traversal: {value!r}")
+    return value
 
 
 def upload_to_s3_multipart(s3_client, bucket_name, s3_key, data, metadata,
@@ -76,7 +115,7 @@ def lambda_handler(event, context):
             and len(event_instance_ids) > 0):
         # Dispatcher invocation mode
         instance_ids = event_instance_ids
-        cluster_id = event_cluster_id
+        cluster_id = _validate_rds_id(event_cluster_id, "cluster_id")
         use_cluster_prefix = True
     else:
         # Backward-compatible: environment variable mode
@@ -87,6 +126,7 @@ def lambda_handler(event, context):
     bucket_name = os.environ["BUCKET_NAME"]
     state_table_name = os.environ["STATE_TABLE_NAME"]
     state_table = dynamodb.Table(state_table_name)
+    lookback_minutes = int(os.environ.get("LOOKBACK_MINUTES", 10))
 
     total_processed = 0
     total_skipped = 0
@@ -94,13 +134,18 @@ def lambda_handler(event, context):
 
     for instance_id in instance_ids:
         instance_id = instance_id.strip()
-        print(f"Processing logs from instance: {instance_id}")
+        try:
+            _validate_rds_id(instance_id, "instance_id")
+        except ValueError:
+            logger.error("Skipping instance with unsafe id: %r", instance_id)
+            continue
+        logger.info("Processing logs from instance: %s", instance_id)
 
         response = rds_client.describe_db_log_files(
             DBInstanceIdentifier=instance_id,
             FilenameContains="audit",
             FileLastWritten=int(
-                (datetime.now() - timedelta(minutes=10)).timestamp() * 1000
+                (datetime.now() - timedelta(minutes=lookback_minutes)).timestamp() * 1000
             ),
         )
 
@@ -112,6 +157,12 @@ def lambda_handler(event, context):
             log_size = log_file["Size"]
             log_last_written = log_file["LastWritten"]
 
+            try:
+                _validate_log_filename(log_filename)
+            except ValueError:
+                logger.error("Skipping log file with unsafe name: %r", log_filename)
+                continue
+
             # Check if already processed
             state_key = f"{instance_id}#{log_filename}"
             try:
@@ -119,11 +170,12 @@ def lambda_handler(event, context):
                 if "Item" in existing:
                     item = existing["Item"]
                     if (item["last_written"] == log_last_written
-                            and item["size"] == log_size):
+                            and item["size"] == log_size 
+                            and item.get("status") == "completed"):
                         skipped_count += 1
                         continue
             except Exception as e:
-                print(f"Error checking state for {log_filename}: {e}")
+                logger.error("Error checking state for %s: %s", log_filename, e)
 
             # Download log file (paginated)
             log_data_parts = []
@@ -175,10 +227,11 @@ def lambda_handler(event, context):
                     "size": log_size,
                     "processed_at": datetime.now().isoformat(),
                     "status": "completed",
+                    "expiration_time": int((datetime.now() + timedelta(days=180)).timestamp()),
                 })
                 processed_count += 1
             except Exception as e:
-                print(f"Error uploading {log_filename} to S3: {e}")
+                logger.error("Error uploading %s to S3: %s", log_filename, e)
                 state_table.put_item(Item={
                     "log_file_id": state_key,
                     "instance_id": instance_id,
@@ -189,15 +242,16 @@ def lambda_handler(event, context):
                     "processed_at": datetime.now().isoformat(),
                     "status": "failed",
                     "error_message": str(e),
+                    "expiration_time": int((datetime.now() + timedelta(days=180)).timestamp()),
                 })
 
         total_processed += processed_count
         total_skipped += skipped_count
         total_found += len(response["DescribeDBLogFiles"])
-        print(
-            f"Instance {instance_id}: "
-            f"Processed={processed_count}, Skipped={skipped_count}, "
-            f"Found={len(response['DescribeDBLogFiles'])}"
+        logger.info(
+            "Instance %s: Processed=%d, Skipped=%d, Found=%d",
+            instance_id, processed_count, skipped_count,
+            len(response["DescribeDBLogFiles"]),
         )
 
     return {

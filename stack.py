@@ -18,12 +18,15 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
     aws_athena as athena,
+    aws_cloudwatch as cloudwatch,
     aws_dynamodb as dynamodb,
     aws_events as events,
     aws_events_targets as targets,
     aws_glue as glue,
     aws_iam as iam,
     aws_lambda as _lambda,
+    aws_logs as logs,
+    aws_sqs as sqs,
 )
 from constructs import Construct
 
@@ -69,13 +72,22 @@ class RDSAuditSolutionStack(Stack):
                 type=dynamodb.AttributeType.STRING,
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=RemovalPolicy.RETAIN,
+            time_to_live_attribute="expiration_time",
         )
 
         # ── Worker Lambda ─────────────────────────────────────────────────
+        worker_log_group = logs.LogGroup(
+            self, "WorkerLogGroup",
+            log_group_name="/aws/lambda/rds-audit-log-retriever",
+            retention=logs.RetentionDays.TWO_WEEKS,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+
         worker_env = {
             "BUCKET_NAME": s3_bucket_name,
             "STATE_TABLE_NAME": state_table.table_name,
+            "LOOKBACK_MINUTES": str(dispatcher_schedule_minutes * 2),
         }
         # Backward compatibility: if aurora_instance_ids is set, keep INSTANCE_IDS env var
         if instance_ids and instance_ids != "your-cluster-instance-1,your-cluster-instance-2":
@@ -91,6 +103,7 @@ class RDSAuditSolutionStack(Stack):
             memory_size=lambda_memory,
             timeout=Duration.seconds(lambda_timeout),
             environment=worker_env,
+            log_group=worker_log_group,
         )
 
         # ── Worker IAM permissions ────────────────────────────────────────
@@ -110,13 +123,49 @@ class RDSAuditSolutionStack(Stack):
                 "s3:PutObject",
                 "s3:AbortMultipartUpload",
             ],
-            resources=[f"arn:aws:s3:::{s3_bucket_name}/*"],
+            resources=[f"arn:aws:s3:::{s3_bucket_name}/audit-logs/*"],
         ))
 
         # DynamoDB: read/write state table
         state_table.grant_read_write_data(worker_fn)
 
+        # ── CloudWatch Alarms ─────────────────────────────────────────────
+        cloudwatch.Alarm(
+            self, "WorkerErrorAlarm",
+            alarm_name="rds-audit-worker-errors",
+            alarm_description="Worker Lambda invocation errors",
+            metric=worker_fn.metric_errors(
+                period=Duration.minutes(5),
+                statistic="Sum",
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+
+        cloudwatch.Alarm(
+            self, "WorkerDurationAlarm",
+            alarm_name="rds-audit-worker-duration-p99",
+            alarm_description="Worker Lambda p99 duration exceeds 80% of timeout",
+            metric=worker_fn.metric_duration(
+                period=Duration.minutes(5),
+                statistic="p99",
+            ),
+            threshold=lambda_timeout * 0.8 * 1000,  # milliseconds
+            evaluation_periods=3,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+
         # ── Dispatcher Lambda ─────────────────────────────────────────────
+        dispatcher_log_group = logs.LogGroup(
+            self, "DispatcherLogGroup",
+            log_group_name="/aws/lambda/rds-audit-log-dispatcher",
+            retention=logs.RetentionDays.TWO_WEEKS,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+
         dispatcher_fn = _lambda.Function(
             self, "AuditLogDispatcher",
             function_name="rds-audit-log-dispatcher",
@@ -131,6 +180,7 @@ class RDSAuditSolutionStack(Stack):
                 "CONFIG_S3_KEY": config_s3_key,
                 "WORKER_FUNCTION_NAME": worker_fn.function_name,
             },
+            log_group=dispatcher_log_group,
         )
 
         # ── Dispatcher IAM permissions ────────────────────────────────────
@@ -151,10 +201,22 @@ class RDSAuditSolutionStack(Stack):
             schedule=events.Schedule.rate(Duration.minutes(dispatcher_schedule_minutes)),
             description=f"Trigger audit log dispatcher every {dispatcher_schedule_minutes} minutes",
         )
-        rule.add_target(targets.LambdaFunction(dispatcher_fn))
+        rule.add_target(targets.LambdaFunction(
+            dispatcher_fn,
+            dead_letter_queue=sqs.Queue(self, "DispatcherDLQ"),
+            max_event_age=Duration.minutes(5),
+            retry_attempts=2,
+        ))
 
         # ── Cluster Discovery Lambda ──────────────────────────────────────
         target_rds_type = self.node.try_get_context("target_rds_type") or "aurora-mysql"
+
+        discovery_log_group = logs.LogGroup(
+            self, "DiscoveryLogGroup",
+            log_group_name="/aws/lambda/rds-audit-cluster-discovery",
+            retention=logs.RetentionDays.TWO_WEEKS,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
 
         discovery_fn = _lambda.Function(
             self, "ClusterDiscovery",
@@ -170,6 +232,7 @@ class RDSAuditSolutionStack(Stack):
                 "CONFIG_S3_KEY": config_s3_key,
                 "TARGET_RDS_TYPE": target_rds_type,
             },
+            log_group=discovery_log_group,
         )
 
         # Discovery IAM: RDS describe clusters + instances + parameter/option groups
@@ -181,7 +244,12 @@ class RDSAuditSolutionStack(Stack):
                 "rds:DescribeDBInstances",
                 "rds:DescribeOptionGroups",
             ],
-            resources=["*"],
+            resources=[
+                f"arn:aws:rds:{self.region}:{self.account}:cluster:*",
+                f"arn:aws:rds:{self.region}:{self.account}:cluster-pg:*",
+                f"arn:aws:rds:{self.region}:{self.account}:og:*",
+                f"arn:aws:rds:{self.region}:{self.account}:db:*",
+            ],
         ))
 
         # Discovery IAM: S3 read + write config file
@@ -267,7 +335,7 @@ class RDSAuditSolutionStack(Stack):
         event_time_expr = (
             "CASE WHEN regexp_like(timestamp, '^\\d+$')\n"
             "            THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)\n"
-            "            ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')\n"
+            "            ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))\n"
             "       END AS event_time"
         )
 
@@ -275,10 +343,10 @@ class RDSAuditSolutionStack(Stack):
         select_cols = (
             f"SELECT {event_time_expr},\n"
             f"       serverhost, username, host,\n"
-            f"       CAST(connectionid AS BIGINT) AS connectionid,\n"
-            f"       CAST(queryid AS BIGINT) AS queryid,\n"
+            f"       TRY_CAST(connectionid AS BIGINT) AS connectionid,\n"
+            f"       TRY_CAST(queryid AS BIGINT) AS queryid,\n"
             f"       operation, database, object,\n"
-            f"       CAST(retcode AS INTEGER) AS retcode\n"
+            f"       TRY_CAST(retcode AS INTEGER) AS retcode\n"
         )
 
         saved_queries = {
@@ -305,12 +373,12 @@ class RDSAuditSolutionStack(Stack):
                     f"FROM {db_tbl}\n"
                     f"WHERE CASE WHEN regexp_like(timestamp, '^\\d+$')\n"
                     f"           THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)\n"
-                    f"           ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')\n"
-                    f"      END >= TIMESTAMP '2024-01-01 00:00:00'\n"
+                    f"           ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))\n"
+                    f"      END >= TIMESTAMP '2026-03-01 00:00:00'\n"
                     f"  AND CASE WHEN regexp_like(timestamp, '^\\d+$')\n"
                     f"           THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)\n"
-                    f"           ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')\n"
-                    f"      END <= TIMESTAMP '2024-12-31 23:59:59'\n"
+                    f"           ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))\n"
+                    f"      END <= TIMESTAMP '2026-12-31 23:59:59'\n"
                     f"ORDER BY timestamp DESC\n"
                     f"LIMIT 100;\n"
                 ),
@@ -322,7 +390,7 @@ class RDSAuditSolutionStack(Stack):
                     f"-- Query failed operations (retcode != 0)\n"
                     f"{select_cols}"
                     f"FROM {db_tbl}\n"
-                    f"WHERE CAST(retcode AS INTEGER) != 0\n"
+                    f"WHERE TRY_CAST(retcode AS INTEGER) != 0\n"
                     f"ORDER BY timestamp DESC\n"
                     f"LIMIT 100;\n"
                 ),
@@ -359,7 +427,7 @@ class RDSAuditSolutionStack(Stack):
                     f"SELECT username,\n"
                     f"       operation,\n"
                     f"       COUNT(*) AS operation_count,\n"
-                    f"       SUM(CASE WHEN CAST(retcode AS INTEGER) != 0 THEN 1 ELSE 0 END) AS failed_count\n"
+                    f"       SUM(CASE WHEN TRY_CAST(retcode AS INTEGER) != 0 THEN 1 ELSE 0 END) AS failed_count\n"
                     f"FROM {db_tbl}\n"
                     f"GROUP BY username, operation\n"
                     f"ORDER BY operation_count DESC;\n"

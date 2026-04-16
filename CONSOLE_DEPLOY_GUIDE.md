@@ -17,14 +17,15 @@
 1. DynamoDB 状态表
 2. IAM 角色 — Worker Lambda
 3. Worker Lambda 函数
-4. IAM 角色 — Dispatcher Lambda
-5. Dispatcher Lambda 函数
-6. EventBridge 定时规则（Dispatcher）
-7. IAM 角色 — Discovery Lambda
-8. Discovery Lambda 函数
-9. EventBridge 每日规则（Discovery）
-10. Glue 数据库与外表
-11. Athena Saved Queries
+4. CloudWatch 告警（Worker Lambda）
+5. IAM 角色 — Dispatcher Lambda
+6. Dispatcher Lambda 函数
+7. EventBridge 定时规则（Dispatcher）
+8. IAM 角色 — Discovery Lambda
+9. Discovery Lambda 函数
+10. EventBridge 每日规则（Discovery）
+11. Glue 数据库与外表
+12. Athena Saved Queries
 
 ---
 
@@ -39,7 +40,15 @@
 | 排序键 | 不设置 |
 | 容量模式 | 按需 |
 
-**验证：** 创建完成后，在表列表中确认 `rds-audit-log-state` 状态为"活动"。
+创建完成后，进入表详情 > **附加设置** > **生存时间 (TTL)** > 管理 TTL：
+
+| 配置项 | 值 |
+|--------|-----|
+| TTL 属性名称 | `expiration_time` |
+
+启用后，Lambda 写入的每条记录都会自动在 180 天后过期删除。
+
+**验证：** 创建完成后，在表列表中确认 `rds-audit-log-state` 状态为"活动"，附加设置中 TTL 已启用。
 
 ---
 
@@ -79,7 +88,7 @@
         "s3:PutObject",
         "s3:AbortMultipartUpload"
       ],
-      "Resource": "arn:aws:s3:::<S3_BUCKET>/*"
+      "Resource": "arn:aws:s3:::<S3_BUCKET>/audit-logs/*"
     },
     {
       "Sid": "DynamoDBStateTable",
@@ -144,6 +153,7 @@
 |----|-----|------|
 | `BUCKET_NAME` | `<S3_BUCKET>` | 审计日志存储桶 |
 | `STATE_TABLE_NAME` | `rds-audit-log-state` | DynamoDB 状态表名 |
+| `LOOKBACK_MINUTES` | `10` | 向前回溯的分钟数（应为 Dispatcher 调度间隔的 2 倍，默认 10） |
 | `INSTANCE_IDS` | （可选）`instance-1,instance-2` | 仅单集群模式需要；多集群模式由 Dispatcher 传入，无需设置 |
 
 ### 3.4 上传代码
@@ -165,11 +175,49 @@ zip -r ../../lambda_code.zip *.py
 
 ---
 
-## 步骤 4：创建 Dispatcher Lambda IAM 角色
+## 步骤 4：创建 CloudWatch 告警
+
+**导航：** CloudWatch > 告警 > 创建告警
+
+### 4.1 Worker Lambda 错误告警
+
+点击"选择指标" > Lambda > 按函数名称 > 选择 `rds-audit-log-retriever` 的 `Errors` 指标。
+
+| 配置项 | 值 |
+|--------|-----|
+| 统计数据 | Sum |
+| 时间段 | 5 分钟 |
+| 条件 | 大于或等于 `1` |
+| 连续评估期 | 1 |
+| 缺少数据处理 | 将缺少的数据视为良好 |
+| 告警名称 | `rds-audit-worker-errors` |
+| 告警描述 | `Worker Lambda invocation errors` |
+
+### 4.2 Worker Lambda 执行时长告警
+
+点击"选择指标" > Lambda > 按函数名称 > 选择 `rds-audit-log-retriever` 的 `Duration` 指标。
+
+| 配置项 | 值 |
+|--------|-----|
+| 统计数据 | p99 |
+| 时间段 | 5 分钟 |
+| 条件 | 大于或等于 `240000`（毫秒，即超时值 300 秒的 80%） |
+| 连续评估期 | 3 |
+| 缺少数据处理 | 将缺少的数据视为良好 |
+| 告警名称 | `rds-audit-worker-duration-p99` |
+| 告警描述 | `Worker Lambda p99 duration exceeds 80% of timeout` |
+
+> 如果修改了 Worker Lambda 超时时间，阈值应同步调整为 `超时秒数 × 0.8 × 1000`。
+
+**验证：** 在 CloudWatch > 告警列表中确认两个告警状态为"数据不足"（初始正常状态）。
+
+---
+
+## 步骤 5：创建 Dispatcher Lambda IAM 角色
 
 **导航：** IAM > 角色 > 创建角色
 
-### 4.1 创建角色
+### 5.1 创建角色
 
 | 配置项 | 值 |
 |--------|-----|
@@ -177,7 +225,7 @@ zip -r ../../lambda_code.zip *.py
 | 使用案例 | Lambda |
 | 角色名称 | `rds-audit-dispatcher-role` |
 
-### 4.2 附加权限策略
+### 5.2 附加权限策略
 
 创建角色后，添加内联策略：
 
@@ -217,11 +265,11 @@ zip -r ../../lambda_code.zip *.py
 
 ---
 
-## 步骤 5：创建 Dispatcher Lambda 函数
+## 步骤 6：创建 Dispatcher Lambda 函数
 
 **导航：** Lambda > 函数 > 创建函数
 
-### 5.1 基本配置
+### 6.1 基本配置
 
 | 配置项 | 值 |
 |--------|-----|
@@ -230,14 +278,14 @@ zip -r ../../lambda_code.zip *.py
 | 架构 | arm64 |
 | 执行角色 | 使用现有角色 → `rds-audit-dispatcher-role` |
 
-### 5.2 常规配置
+### 6.2 常规配置
 
 | 配置项 | 值 |
 |--------|-----|
 | 内存 | 256 MB |
 | 超时 | 1 分 0 秒 |
 
-### 5.3 环境变量
+### 6.3 环境变量
 
 | 键 | 值 | 说明 |
 |----|-----|------|
@@ -245,7 +293,7 @@ zip -r ../../lambda_code.zip *.py
 | `CONFIG_S3_KEY` | `<CONFIG_S3_KEY>` | 配置文件路径，默认 `config/cluster_config.json` |
 | `WORKER_FUNCTION_NAME` | `rds-audit-log-retriever` | Worker Lambda 函数名 |
 
-### 5.4 上传代码
+### 6.4 上传代码
 
 使用与 Worker 相同的 `lambda_code.zip`（包含 `index.py`、`dispatcher.py`、`config_model.py`、`cluster_discovery.py`）。
 
@@ -255,11 +303,22 @@ zip -r ../../lambda_code.zip *.py
 
 ---
 
-## 步骤 6：创建 EventBridge 定时规则
+## 步骤 7：创建 EventBridge 定时规则
+
+### 7.1 预先创建 Dispatcher DLQ
+
+**导航：** Amazon SQS > 队列 > 创建队列
+
+| 配置项 | 值 |
+|--------|-----|
+| 队列类型 | 标准 |
+| 队列名称 | `rds-audit-dispatcher-dlq` |
+
+创建后记录队列 ARN，后续步骤 7.4 中使用。
+
+### 7.2 规则配置
 
 **导航：** Amazon EventBridge > 规则 > 创建规则
-
-### 6.1 规则配置
 
 | 配置项 | 值 |
 |--------|-----|
@@ -267,7 +326,7 @@ zip -r ../../lambda_code.zip *.py
 | 事件总线 | default |
 | 规则类型 | 计划 |
 
-### 6.2 定义计划
+### 7.3 定义计划
 
 选择"定期计划"，输入 rate 表达式：
 
@@ -277,7 +336,7 @@ rate(5 minutes)
 
 > 可根据需要调整频率，如 `rate(10 minutes)` 或 `rate(1 hour)`。
 
-### 6.3 选择目标
+### 7.4 选择目标
 
 | 配置项 | 值 |
 |--------|-----|
@@ -285,17 +344,25 @@ rate(5 minutes)
 | 选择目标 | Lambda 函数 |
 | 函数 | `rds-audit-log-dispatcher` |
 
+展开"**附加设置**"，配置重试策略和死信队列：
+
+| 配置项 | 值 |
+|--------|-----|
+| 最大事件存活时间 | 5 分钟 |
+| 重试尝试次数 | 2 |
+| 死信队列 | SQS 队列 → `rds-audit-dispatcher-dlq` |
+
 点击"创建规则"。
 
 **验证：** 在规则列表中确认 `rds-audit-dispatcher-schedule` 状态为"已启用"。等待一个调度周期后，检查 Dispatcher Lambda 的 CloudWatch Logs 确认已被触发。
 
 ---
 
-## 步骤 7：创建 Discovery Lambda IAM 角色
+## 步骤 8：创建 Discovery Lambda IAM 角色
 
 **导航：** IAM > 角色 > 创建角色
 
-### 7.1 创建角色
+### 8.1 创建角色
 
 | 配置项 | 值 |
 |--------|-----|
@@ -303,7 +370,7 @@ rate(5 minutes)
 | 使用案例 | Lambda |
 | 角色名称 | `rds-audit-discovery-role` |
 
-### 7.2 附加权限策略
+### 8.2 附加权限策略
 
 创建角色后，添加内联策略：
 
@@ -321,7 +388,12 @@ rate(5 minutes)
         "rds:DescribeDBInstances",
         "rds:DescribeOptionGroups"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:rds:<REGION>:<ACCOUNT_ID>:cluster:*",
+        "arn:aws:rds:<REGION>:<ACCOUNT_ID>:cluster-pg:*",
+        "arn:aws:rds:<REGION>:<ACCOUNT_ID>:og:*",
+        "arn:aws:rds:<REGION>:<ACCOUNT_ID>:db:*"
+      ]
     },
     {
       "Sid": "S3ReadWriteConfig",
@@ -352,11 +424,11 @@ rate(5 minutes)
 
 ---
 
-## 步骤 8：创建 Discovery Lambda 函数
+## 步骤 9：创建 Discovery Lambda 函数
 
 **导航：** Lambda > 函数 > 创建函数
 
-### 8.1 基本配置
+### 9.1 基本配置
 
 | 配置项 | 值 |
 |--------|-----|
@@ -365,14 +437,14 @@ rate(5 minutes)
 | 架构 | arm64 |
 | 执行角色 | 使用现有角色 → `rds-audit-discovery-role` |
 
-### 8.2 常规配置
+### 9.2 常规配置
 
 | 配置项 | 值 |
 |--------|-----|
 | 内存 | 256 MB |
 | 超时 | 2 分 0 秒 |
 
-### 8.3 环境变量
+### 9.3 环境变量
 
 | 键 | 值 | 说明 |
 |----|-----|------|
@@ -380,7 +452,7 @@ rate(5 minutes)
 | `CONFIG_S3_KEY` | `<CONFIG_S3_KEY>` | 配置文件路径，默认 `config/cluster_config.json` |
 | `TARGET_RDS_TYPE` | `aurora-mysql` | 目标类型：`aurora-mysql`、`rds-mysql`、`both` |
 
-### 8.4 上传代码
+### 9.4 上传代码
 
 使用与 Worker/Dispatcher 相同的 `lambda_code.zip`。
 
@@ -390,11 +462,11 @@ rate(5 minutes)
 
 ---
 
-## 步骤 9：创建 EventBridge 每日规则（Discovery）
+## 步骤 10：创建 EventBridge 每日规则（Discovery）
 
 **导航：** Amazon EventBridge > 规则 > 创建规则
 
-### 9.1 规则配置
+### 10.1 规则配置
 
 | 配置项 | 值 |
 |--------|-----|
@@ -402,7 +474,7 @@ rate(5 minutes)
 | 事件总线 | default |
 | 规则类型 | 计划 |
 
-### 9.2 定义计划
+### 10.2 定义计划
 
 选择"Cron 表达式"：
 
@@ -412,7 +484,7 @@ cron(0 2 * * ? *)
 
 > 每日 02:00 UTC 执行。可根据需要调整时间。
 
-### 9.3 选择目标
+### 10.3 选择目标
 
 | 配置项 | 值 |
 |--------|-----|
@@ -424,9 +496,9 @@ cron(0 2 * * ? *)
 
 ---
 
-## 步骤 10：创建 Glue 数据库与外表
+## 步骤 11：创建 Glue 数据库与外表
 
-### 10.1 创建 Glue 数据库
+### 11.1 创建 Glue 数据库
 
 **导航：** AWS Glue > Data Catalog > Databases > Add database
 
@@ -435,7 +507,7 @@ cron(0 2 * * ? *)
 | 数据库名称 | `rds_audit_logs` |
 | 描述 | `RDS MySQL audit logs database for Athena queries` |
 
-### 10.2 创建 Glue 外表
+### 11.2 创建 Glue 外表
 
 **导航：** Amazon Athena > Query editor
 
@@ -472,13 +544,13 @@ LOCATION 's3://<S3_BUCKET>/audit-logs/';
 
 ---
 
-## 步骤 11：创建 Athena Saved Queries
+## 步骤 12：创建 Athena Saved Queries
 
 **导航：** Amazon Athena > Saved queries > Create saved query
 
 依次创建以下 7 个查询。每个查询的数据库选择 `rds_audit_logs`。
 
-### 11.1 Query By User
+### 12.1 Query By User
 
 - Name: `Audit Logs - Query By User`
 - Description: `Query audit logs filtered by a specific username`
@@ -487,20 +559,20 @@ LOCATION 's3://<S3_BUCKET>/audit-logs/';
 -- Replace 'target_user' with the actual username
 SELECT CASE WHEN regexp_like(timestamp, '^\d+$')
             THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)
-            ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')
+            ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))
        END AS event_time,
        serverhost, username, host,
-       CAST(connectionid AS BIGINT) AS connectionid,
-       CAST(queryid AS BIGINT) AS queryid,
+       TRY_CAST(connectionid AS BIGINT) AS connectionid,
+       TRY_CAST(queryid AS BIGINT) AS queryid,
        operation, database, object,
-       CAST(retcode AS INTEGER) AS retcode
+       TRY_CAST(retcode AS INTEGER) AS retcode
 FROM rds_audit_logs.audit_logs
 WHERE username = 'target_user'
 ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-### 11.2 Query By Time Range
+### 12.2 Query By Time Range
 
 - Name: `Audit Logs - Query By Time Range`
 - Description: `Query audit logs within a specific time range`
@@ -510,27 +582,27 @@ LIMIT 100;
 -- Supports both Aurora (microsecond Unix ts) and RDS MySQL (YYYYMMDD HH:MM:SS)
 SELECT CASE WHEN regexp_like(timestamp, '^\d+$')
             THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)
-            ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')
+            ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))
        END AS event_time,
        serverhost, username, host,
-       CAST(connectionid AS BIGINT) AS connectionid,
-       CAST(queryid AS BIGINT) AS queryid,
+       TRY_CAST(connectionid AS BIGINT) AS connectionid,
+       TRY_CAST(queryid AS BIGINT) AS queryid,
        operation, database, object,
-       CAST(retcode AS INTEGER) AS retcode
+       TRY_CAST(retcode AS INTEGER) AS retcode
 FROM rds_audit_logs.audit_logs
 WHERE CASE WHEN regexp_like(timestamp, '^\d+$')
            THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)
-           ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')
+           ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))
       END >= TIMESTAMP '2024-01-01 00:00:00'
   AND CASE WHEN regexp_like(timestamp, '^\d+$')
            THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)
-           ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')
+           ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))
       END <= TIMESTAMP '2024-12-31 23:59:59'
 ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-### 11.3 Failed Operations
+### 12.3 Failed Operations
 
 - Name: `Audit Logs - Failed Operations`
 - Description: `Query operations that failed (retcode != 0)`
@@ -538,20 +610,20 @@ LIMIT 100;
 ```sql
 SELECT CASE WHEN regexp_like(timestamp, '^\d+$')
             THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)
-            ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')
+            ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))
        END AS event_time,
        serverhost, username, host,
-       CAST(connectionid AS BIGINT) AS connectionid,
-       CAST(queryid AS BIGINT) AS queryid,
+       TRY_CAST(connectionid AS BIGINT) AS connectionid,
+       TRY_CAST(queryid AS BIGINT) AS queryid,
        operation, database, object,
-       CAST(retcode AS INTEGER) AS retcode
+       TRY_CAST(retcode AS INTEGER) AS retcode
 FROM rds_audit_logs.audit_logs
-WHERE CAST(retcode AS INTEGER) != 0
+WHERE TRY_CAST(retcode AS INTEGER) != 0
 ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-### 11.4 DDL Operations
+### 12.4 DDL Operations
 
 - Name: `Audit Logs - DDL Operations`
 - Description: `Query DDL operations (CREATE, ALTER, DROP, TRUNCATE)`
@@ -559,20 +631,20 @@ LIMIT 100;
 ```sql
 SELECT CASE WHEN regexp_like(timestamp, '^\d+$')
             THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)
-            ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')
+            ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))
        END AS event_time,
        serverhost, username, host,
-       CAST(connectionid AS BIGINT) AS connectionid,
-       CAST(queryid AS BIGINT) AS queryid,
+       TRY_CAST(connectionid AS BIGINT) AS connectionid,
+       TRY_CAST(queryid AS BIGINT) AS queryid,
        operation, database, object,
-       CAST(retcode AS INTEGER) AS retcode
+       TRY_CAST(retcode AS INTEGER) AS retcode
 FROM rds_audit_logs.audit_logs
 WHERE operation IN ('CREATE', 'ALTER', 'DROP', 'TRUNCATE')
 ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-### 11.5 DML Operations
+### 12.5 DML Operations
 
 - Name: `Audit Logs - DML Operations`
 - Description: `Query DML operations (INSERT, UPDATE, DELETE)`
@@ -580,20 +652,20 @@ LIMIT 100;
 ```sql
 SELECT CASE WHEN regexp_like(timestamp, '^\d+$')
             THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)
-            ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')
+            ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))
        END AS event_time,
        serverhost, username, host,
-       CAST(connectionid AS BIGINT) AS connectionid,
-       CAST(queryid AS BIGINT) AS queryid,
+       TRY_CAST(connectionid AS BIGINT) AS connectionid,
+       TRY_CAST(queryid AS BIGINT) AS queryid,
        operation, database, object,
-       CAST(retcode AS INTEGER) AS retcode
+       TRY_CAST(retcode AS INTEGER) AS retcode
 FROM rds_audit_logs.audit_logs
 WHERE operation IN ('INSERT', 'UPDATE', 'DELETE')
 ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-### 11.6 User Operation Statistics
+### 12.6 User Operation Statistics
 
 - Name: `Audit Logs - User Operation Statistics`
 - Description: `Statistics of operations grouped by username and operation type`
@@ -602,13 +674,13 @@ LIMIT 100;
 SELECT username,
        operation,
        COUNT(*) AS operation_count,
-       SUM(CASE WHEN CAST(retcode AS INTEGER) != 0 THEN 1 ELSE 0 END) AS failed_count
+       SUM(CASE WHEN TRY_CAST(retcode AS INTEGER) != 0 THEN 1 ELSE 0 END) AS failed_count
 FROM rds_audit_logs.audit_logs
 GROUP BY username, operation
 ORDER BY operation_count DESC;
 ```
 
-### 11.7 DCL Operations
+### 12.7 DCL Operations
 
 - Name: `Audit Logs - DCL Operations`
 - Description: `Query DCL operations (GRANT, REVOKE)`
@@ -616,13 +688,13 @@ ORDER BY operation_count DESC;
 ```sql
 SELECT CASE WHEN regexp_like(timestamp, '^\d+$')
             THEN from_unixtime(CAST(timestamp AS BIGINT) / 1000000)
-            ELSE parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss')
+            ELSE TRY(parse_datetime(timestamp, 'yyyyMMdd HH:mm:ss'))
        END AS event_time,
        serverhost, username, host,
-       CAST(connectionid AS BIGINT) AS connectionid,
-       CAST(queryid AS BIGINT) AS queryid,
+       TRY_CAST(connectionid AS BIGINT) AS connectionid,
+       TRY_CAST(queryid AS BIGINT) AS queryid,
        operation, database, object,
-       CAST(retcode AS INTEGER) AS retcode
+       TRY_CAST(retcode AS INTEGER) AS retcode
 FROM rds_audit_logs.audit_logs
 WHERE operation IN ('GRANT', 'REVOKE')
 ORDER BY timestamp DESC
@@ -686,10 +758,13 @@ python scripts/discover_clusters.py --target-rds-type aurora-mysql --region <REG
 3. AWS Glue > Databases > 删除 `rds_audit_logs`
 4. EventBridge > 规则 > 删除 `rds-audit-cluster-discovery-schedule`
 5. EventBridge > 规则 > 删除 `rds-audit-dispatcher-schedule`
-6. Lambda > 函数 > 删除 `rds-audit-cluster-discovery`
-7. Lambda > 函数 > 删除 `rds-audit-log-dispatcher`
-8. Lambda > 函数 > 删除 `rds-audit-log-retriever`
-9. IAM > 角色 > 删除 `rds-audit-discovery-role`
-10. IAM > 角色 > 删除 `rds-audit-dispatcher-role`
-11. IAM > 角色 > 删除 `rds-audit-worker-role`
-12. DynamoDB > 表 > 删除 `rds-audit-log-state`
+6. SQS > 队列 > 删除 `rds-audit-dispatcher-dlq`
+7. Lambda > 函数 > 删除 `rds-audit-cluster-discovery`
+8. Lambda > 函数 > 删除 `rds-audit-log-dispatcher`
+9. Lambda > 函数 > 删除 `rds-audit-log-retriever`
+10. CloudWatch > 告警 > 删除 `rds-audit-worker-errors`
+11. CloudWatch > 告警 > 删除 `rds-audit-worker-duration-p99`
+12. IAM > 角色 > 删除 `rds-audit-discovery-role`
+13. IAM > 角色 > 删除 `rds-audit-dispatcher-role`
+14. IAM > 角色 > 删除 `rds-audit-worker-role`
+15. DynamoDB > 表 > 删除 `rds-audit-log-state`

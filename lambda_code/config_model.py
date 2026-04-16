@@ -21,8 +21,11 @@ Config format (version "1.0"):
 """
 
 import json
+import re
 
 SUPPORTED_VERSION = "1.0"
+
+_SAFE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9\-]{0,62}$')
 
 _REQUIRED_TOP_LEVEL_FIELDS = {
     "version": str,
@@ -153,12 +156,25 @@ def _validate_cluster_entry(cluster: dict, idx: int) -> None:
                 f"got {type(cluster[field]).__name__}"
             )
 
-    # instance_ids must contain only strings
+    # cluster_id must be a safe RDS identifier
+    cluster_id = cluster["cluster_id"]
+    if not _SAFE_ID_RE.match(cluster_id):
+        raise ValueError(
+            f"clusters[{idx}].cluster_id contains unsafe characters: {cluster_id!r}. "
+            "Only alphanumeric characters and hyphens are allowed."
+        )
+
+    # instance_ids must contain only safe RDS identifier strings
     for i, iid in enumerate(cluster["instance_ids"]):
         if not isinstance(iid, str):
             raise ValueError(
                 f"clusters[{idx}].instance_ids[{i}] must be str, "
                 f"got {type(iid).__name__}"
+            )
+        if not _SAFE_ID_RE.match(iid):
+            raise ValueError(
+                f"clusters[{idx}].instance_ids[{i}] contains unsafe characters: {iid!r}. "
+                "Only alphanumeric characters and hyphens are allowed."
             )
 
     # enabled must be bool

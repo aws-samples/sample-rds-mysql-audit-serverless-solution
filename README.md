@@ -68,14 +68,15 @@ Configure `target_rds_type` in `cdk.context.json`:
 ## Quick Start
 
 ```bash
-cd rds-audit-solution-deploy
+git clone https://github.com/jet1350/rds-mysql-audit-serverless-solution.git
+cd rds-mysql-audit-serverless-solution
 
 # Set up virtual environment
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Edit cdk.context.json with your settings (at minimum: s3_bucket_name, region)
+# Copy from cdk.context.json.example and edit cdk.context.json with your settings (at minimum: s3_bucket_name, region)
 
 # Bootstrap CDK (first time only)
 cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
@@ -87,7 +88,7 @@ cdk deploy
 After deployment, trigger the first discovery manually:
 
 ```bash
-aws lambda invoke --function-name rds-audit-cluster-discovery /dev/stdout
+aws lambda invoke --function-name rds-audit-cluster-discovery --region <region> /dev/stdout
 ```
 
 Or use the local script:
@@ -95,11 +96,11 @@ Or use the local script:
 ```bash
 python scripts/discover_clusters.py \
   --target-rds-type both \
-  --region us-west-1 \
+  --region <region> \
   --upload s3://<your-bucket>/config/cluster_config.json
 ```
 
-> For manual console deployment without CDK, see [CONSOLE_DEPLOY_GUIDE.md](rds-audit-solution-deploy/CONSOLE_DEPLOY_GUIDE.md).
+> For manual console deployment without CDK, see [CONSOLE_DEPLOY_GUIDE.md](CONSOLE_DEPLOY_GUIDE.md).
 
 ## Configuration
 
@@ -197,7 +198,7 @@ s3://<bucket>/audit-logs/{cluster_id}/{YYYY/MM/DD}/{instance_id}/{log_filename}
 ## Project Structure
 
 ```
-rds-audit-solution-deploy/
+rds-mysql-audit-serverless-solution/
 ├── lambda_code/
 │   ├── index.py              # Worker Lambda
 │   ├── dispatcher.py         # Dispatcher Lambda
@@ -207,7 +208,7 @@ rds-audit-solution-deploy/
 │   └── discover_clusters.py  # Local discovery script
 ├── stack.py                  # CDK Stack
 ├── app.py                    # CDK App entry point
-├── cdk.context.json          # Deployment parameters
+├── cdk.context.json.example  # Deployment parameters
 ├── cdk.json                  # CDK config
 ├── requirements.txt          # Python dependencies
 ├── CONSOLE_DEPLOY_GUIDE.md   # Manual console deployment guide

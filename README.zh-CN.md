@@ -29,7 +29,7 @@
                           ▼                 ▼                 ▼
                    ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
                    │   Worker    │   │   Worker    │   │   Worker    │
-                   │ (集群 A)    │   │ (集群 B)     │   │ (实例 C)     │
+                   │ (集群 A)     │   │ (集群 B)    │   │ (实例 C)     │
                    └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
                           │                 │                 │
                           ▼                 ▼                 ▼
@@ -68,14 +68,15 @@
 ## 快速开始
 
 ```bash
-cd rds-audit-solution-deploy
+git clone https://github.com/jet1350/rds-mysql-audit-serverless-solution.git
+cd rds-mysql-audit-serverless-solution
 
 # 创建虚拟环境
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 编辑 cdk.context.json（至少设置 s3_bucket_name 和 region）
+# 从 cdk.context.json.example 复制和编辑 cdk.context.json（至少设置 s3_bucket_name 和 region）
 
 # CDK 引导（首次部署）
 cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
@@ -87,7 +88,7 @@ cdk deploy
 部署完成后，手动触发首次发现：
 
 ```bash
-aws lambda invoke --function-name rds-audit-cluster-discovery /dev/stdout
+aws lambda invoke --function-name rds-audit-cluster-discovery --region <region> /dev/stdout
 ```
 
 或使用本地脚本：
@@ -95,7 +96,7 @@ aws lambda invoke --function-name rds-audit-cluster-discovery /dev/stdout
 ```bash
 python scripts/discover_clusters.py \
   --target-rds-type both \
-  --region us-west-1 \
+  --region <region> \
   --upload s3://<your-bucket>/config/cluster_config.json
 ```
 
@@ -197,7 +198,7 @@ s3://<bucket>/audit-logs/{cluster_id}/{YYYY/MM/DD}/{instance_id}/{log_filename}
 ## 项目结构
 
 ```
-rds-audit-solution-deploy/
+rds-mysql-audit-serverless-solution/
 ├── lambda_code/
 │   ├── index.py              # Worker Lambda
 │   ├── dispatcher.py         # Dispatcher Lambda
@@ -207,7 +208,7 @@ rds-audit-solution-deploy/
 │   └── discover_clusters.py  # 本地发现脚本
 ├── stack.py                  # CDK Stack
 ├── app.py                    # CDK App 入口
-├── cdk.context.json          # 部署参数
+├── cdk.context.json.example  # 部署参数
 ├── cdk.json                  # CDK 配置
 ├── requirements.txt          # Python 依赖
 ├── CONSOLE_DEPLOY_GUIDE.md   # 控制台手动部署指南
