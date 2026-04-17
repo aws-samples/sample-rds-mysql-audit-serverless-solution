@@ -227,3 +227,11 @@ cdk destroy
 - 不开启 `server_audit_logs_upload` 和 CloudWatch Logs Export，避免额外费用
 - S3 桶需提前创建，CDK 不会创建或删除该桶
 - Dispatcher 返回调度摘要（triggered / skipped / failed），可通过 CloudWatch Logs 监控
+
+## 安全
+
+更多信息请参阅 [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications)。
+
+## 许可证
+
+本项目基于 MIT-0 许可证授权，详见 LICENSE 文件。

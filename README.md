@@ -223,8 +223,8 @@ cdk destroy
 
 ## Security
 
-This project is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 
-## Contributing
+## License
 
-Contributions welcome. Please open an issue first to discuss proposed changes.
+This library is licensed under the MIT-0 License. See the LICENSE file.
