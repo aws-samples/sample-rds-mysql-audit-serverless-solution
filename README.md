@@ -68,8 +68,8 @@ Configure `target_rds_type` in `cdk.context.json`:
 ## Quick Start
 
 ```bash
-git clone https://github.com/jet1350/rds-mysql-audit-serverless-solution.git
-cd rds-mysql-audit-serverless-solution
+git clone https://github.com/aws-samples/sample-rds-mysql-audit-serverless-solution.git
+cd sample-rds-mysql-audit-serverless-solution
 
 # Set up virtual environment
 python3 -m venv .venv
@@ -77,6 +77,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # Copy from cdk.context.json.example and edit cdk.context.json with your settings (at minimum: s3_bucket_name, region)
+cp cdk.context.json.example cdk.context.json
 
 # Bootstrap CDK (first time only)
 cdk bootstrap aws://<ACCOUNT_ID>/<REGION>

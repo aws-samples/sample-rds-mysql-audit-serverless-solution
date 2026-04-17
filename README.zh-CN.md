@@ -68,8 +68,8 @@
 ## 快速开始
 
 ```bash
-git clone https://github.com/jet1350/rds-mysql-audit-serverless-solution.git
-cd rds-mysql-audit-serverless-solution
+git clone https://github.com/aws-samples/sample-rds-mysql-audit-serverless-solution.git
+cd sample-rds-mysql-audit-serverless-solution
 
 # 创建虚拟环境
 python3 -m venv .venv
@@ -77,6 +77,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # 从 cdk.context.json.example 复制和编辑 cdk.context.json（至少设置 s3_bucket_name 和 region）
+cp cdk.context.json.example cdk.context.json
 
 # CDK 引导（首次部署）
 cdk bootstrap aws://<ACCOUNT_ID>/<REGION>

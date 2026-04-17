@@ -160,10 +160,10 @@
 
 函数代码 > 上传自 > .zip 文件
 
-将 `rds-audit-solution-deploy/lambda_code/` 目录下的所有 `.py` 文件打包为 zip：
+将 `sample-rds-mysql-audit-serverless-solution/lambda_code/` 目录下的所有 `.py` 文件打包为 zip：
 
 ```bash
-cd rds-audit-solution-deploy/lambda_code
+cd sample-rds-mysql-audit-serverless-solution/lambda_code
 zip -r ../../lambda_code.zip *.py
 ```
 
