@@ -42,6 +42,11 @@ class RDSAuditSolutionStack(Stack):
         s3_bucket_name = self.node.try_get_context("s3_bucket_name")
         lambda_memory = int(self.node.try_get_context("lambda_memory_mb") or 512)
         lambda_timeout = int(self.node.try_get_context("lambda_timeout_seconds") or 300)
+        # gzip-compress audit logs before upload (default on). Accepts bool or string.
+        _compress_ctx = self.node.try_get_context("compress_logs")
+        compress_logs = str(
+            _compress_ctx if _compress_ctx is not None else True
+        ).lower() not in ("false", "0", "no")
 
         # Dispatcher / multi-cluster parameters
         config_s3_key = self.node.try_get_context("config_s3_key") or "config/cluster_config.json"
@@ -92,6 +97,7 @@ class RDSAuditSolutionStack(Stack):
             "BUCKET_NAME": s3_bucket_name,
             "STATE_TABLE_NAME": state_table.table_name,
             "LOOKBACK_MINUTES": str(dispatcher_schedule_minutes * 2),
+            "COMPRESS_LOGS": "true" if compress_logs else "false",
         }
         # Backward compatibility: if aurora_instance_ids is set, keep INSTANCE_IDS env var
         if instance_ids and instance_ids != "your-cluster-instance-1,your-cluster-instance-2":

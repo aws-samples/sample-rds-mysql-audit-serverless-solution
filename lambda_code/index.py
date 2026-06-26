@@ -13,8 +13,16 @@ Supports two invocation modes:
      ``"default"`` and S3 paths remain unchanged.
 
 Supports multipart upload for large log files (>5MB).
+
+Audit logs are gzip-compressed in memory before upload (controlled by the
+``COMPRESS_LOGS`` env var, default on). Compressed objects get a ``.gz``
+suffix; Athena's TextInputFormat transparently decompresses ``.gz`` files by
+extension, so the Glue table / SerDe and saved queries need no changes, and
+compressed objects coexist with pre-existing uncompressed ``.log`` objects in
+the same S3 location.
 """
 import boto3
+import gzip
 import logging
 import os
 import json
@@ -127,6 +135,8 @@ def lambda_handler(event, context):
     state_table_name = os.environ["STATE_TABLE_NAME"]
     state_table = dynamodb.Table(state_table_name)
     lookback_minutes = int(os.environ.get("LOOKBACK_MINUTES", 10))
+    # gzip-compress logs before upload unless explicitly disabled
+    compress_logs = os.environ.get("COMPRESS_LOGS", "true").lower() == "true"
 
     total_processed = 0
     total_skipped = 0
@@ -193,16 +203,26 @@ def lambda_handler(event, context):
                     break
 
             log_data = "".join(log_data_parts).encode("utf-8")
+
+            # gzip-compress in memory before upload; '.gz' suffix lets Athena
+            # auto-decompress by extension (no Glue/SerDe change needed).
+            if compress_logs:
+                upload_data = gzip.compress(log_data, compresslevel=6)
+                object_suffix = ".gz"
+            else:
+                upload_data = log_data
+                object_suffix = ""
+
             date_prefix = datetime.now().strftime('%Y/%m/%d')
             if use_cluster_prefix:
                 s3_key = (
                     f"audit-logs/{cluster_id}/{date_prefix}"
-                    f"/{instance_id}/{log_filename}"
+                    f"/{instance_id}/{log_filename}{object_suffix}"
                 )
             else:
                 s3_key = (
                     f"audit-logs/{date_prefix}"
-                    f"/{instance_id}/{log_filename}"
+                    f"/{instance_id}/{log_filename}{object_suffix}"
                 )
 
             try:
@@ -210,12 +230,14 @@ def lambda_handler(event, context):
                     s3_client=s3_client,
                     bucket_name=bucket_name,
                     s3_key=s3_key,
-                    data=log_data,
+                    data=upload_data,
                     metadata={
                         "source_instance": instance_id,
                         "log_filename": log_filename,
                         "last_written": str(log_last_written),
                         "size": str(log_size),
+                        "compressed": "true" if compress_logs else "false",
+                        "compressed_size": str(len(upload_data)),
                     },
                 )
                 state_table.put_item(Item={

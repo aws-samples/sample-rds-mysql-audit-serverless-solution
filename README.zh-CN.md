@@ -7,7 +7,7 @@
 - **多数据库支持** — Aurora MySQL 集群、RDS MySQL 单实例、RDS MySQL Multi-AZ DB 集群
 - **自动发现** — Discovery Lambda 每日扫描区域内已开启审计日志的数据库，自动更新采集配置
 - **多集群并行采集** — Dispatcher-Worker 架构，多个数据库并行处理，单个失败不影响其他
-- **S3 归档** — 审计日志按 集群/日期/实例 路径分区存储到 S3
+- **S3 归档** — 审计日志经 gzip 压缩后，按 集群/日期/实例 路径分区存储到 S3
 - **Athena 查询** — 自动创建 Glue 外表和 7 个预定义查询，开箱即用
 - **双时间戳格式** — 查询自动识别 Aurora（微秒 Unix 时间戳）和 RDS MySQL（`YYYYMMDD HH:MM:SS`）两种格式
 - **无需 VPC** — 使用 RDS 管理面 API，无需连接数据库端点
@@ -112,6 +112,7 @@ python scripts/discover_clusters.py \
 | `s3_bucket_name` | 是 | — | 存储审计日志的 S3 桶名 |
 | `region` | 否 | `us-west-1` | 部署区域 |
 | `target_rds_type` | 否 | `aurora-mysql` | `aurora-mysql`、`rds-mysql`、`both` |
+| `compress_logs` | 否 | `true` | 上传 S3 前 gzip 压缩审计日志（文件名加 `.gz` 后缀） |
 | `config_s3_key` | 否 | `config/cluster_config.json` | 集群配置文件的 S3 路径 |
 | `dispatcher_schedule_minutes` | 否 | 5 | Dispatcher 调度间隔（分钟） |
 | `lambda_memory_mb` | 否 | 512 | Worker Lambda 内存（MB） |
@@ -186,13 +187,20 @@ python scripts/discover_clusters.py \
 ## S3 路径结构
 
 ```
-s3://<bucket>/audit-logs/{cluster_id}/{YYYY/MM/DD}/{instance_id}/{log_filename}
+s3://<bucket>/audit-logs/{cluster_id}/{YYYY/MM/DD}/{instance_id}/{log_filename}.gz
 ```
+
+默认对日志做 gzip 压缩（`.gz` 后缀，审计文本通常可压缩 8~12 倍）。Athena 的
+`TextInputFormat` 会按扩展名自动解压 `.gz` 文件，因此 Glue 表、SerDe 和预置查询
+均无需改动；压缩后的对象与此前已存在的未压缩 `.log` 对象可共存于同一路径下，
+无需迁移历史数据。在 `cdk.context.json` 中设置 `compress_logs: false` 可关闭压缩
+（对象保持原文件名、无后缀）。
 
 ## 关键设计决策
 
 - **无需 VPC** — Lambda 调用 RDS 管理面 API（`rds.<region>.amazonaws.com`），不连接数据库端点
 - **不使用 CloudWatch Logs 导出** — 避免 $0.67/GB 的 CW Logs 摄入费用，日志直接从 RDS API 到 S3
+- **gzip 压缩** — 上传前在内存中压缩（Python 标准库，无额外依赖），降低 S3 存储与 Athena 扫描成本；`.gz` 由 Athena 自动解压，查询不受影响，历史未压缩文件仍可正常查询
 - **故障隔离** — 每个 Worker 调用独立，单个集群失败不影响其他
 - **配置保留** — Discovery 更新配置时保留手动设置的 `enabled: false` 标记
 

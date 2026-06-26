@@ -154,6 +154,7 @@
 | `BUCKET_NAME` | `<S3_BUCKET>` | 审计日志存储桶 |
 | `STATE_TABLE_NAME` | `rds-audit-log-state` | DynamoDB 状态表名 |
 | `LOOKBACK_MINUTES` | `10` | 向前回溯的分钟数（应为 Dispatcher 调度间隔的 2 倍，默认 10） |
+| `COMPRESS_LOGS` | （可选）`true` | 上传前 gzip 压缩日志，文件名加 `.gz` 后缀；默认 `true`，设为 `false` 关闭 |
 | `INSTANCE_IDS` | （可选）`instance-1,instance-2` | 仅单集群模式需要；多集群模式由 Dispatcher 传入，无需设置 |
 
 ### 3.4 上传代码
@@ -539,6 +540,7 @@ LOCATION 's3://<S3_BUCKET>/audit-logs/';
 
 > 所有列定义为 `string` 类型是因为 OpenCSVSerDe 的要求。数值字段在查询时通过 `CAST` 转换。
 > `timestamp`、`database`、`object` 为保留字，需用反引号包裹。
+> 此表定义同时适用于 gzip 压缩（`.gz`）和未压缩日志：`TextInputFormat` 会按扩展名自动解压 `.gz` 文件，因此开启 `COMPRESS_LOGS` 后无需任何改动，新旧文件可共存于同一路径。
 
 **验证：** 执行 `SELECT * FROM rds_audit_logs.audit_logs LIMIT 10;`，确认能返回审计日志数据。
 

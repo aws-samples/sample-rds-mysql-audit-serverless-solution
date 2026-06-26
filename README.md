@@ -7,7 +7,7 @@ A serverless solution for collecting, storing, and querying audit logs from Amaz
 - **Multi-database support** — Aurora MySQL clusters, RDS MySQL standalone instances, and RDS MySQL Multi-AZ DB clusters
 - **Auto-discovery** — Daily Lambda scan detects new databases with audit logging enabled and updates the collection config automatically
 - **Multi-cluster collection** — Dispatcher-Worker architecture processes multiple databases in parallel with fault isolation
-- **S3 archival** — Audit logs stored in S3 with cluster/date/instance path partitioning
+- **S3 archival** — Audit logs gzip-compressed and stored in S3 with cluster/date/instance path partitioning
 - **Athena integration** — Pre-built Glue table and 7 saved queries for immediate SQL analysis
 - **Dual timestamp support** — Queries handle both Aurora (microsecond Unix) and RDS MySQL (`YYYYMMDD HH:MM:SS`) timestamp formats
 - **No VPC required** — Uses RDS management plane APIs, works without VPC connectivity to database endpoints
@@ -112,6 +112,7 @@ Edit `cdk.context.json`:
 | `s3_bucket_name` | Yes | — | S3 bucket for audit logs |
 | `region` | No | `us-west-1` | Deployment region |
 | `target_rds_type` | No | `aurora-mysql` | `aurora-mysql`, `rds-mysql`, or `both` |
+| `compress_logs` | No | `true` | gzip-compress audit logs before S3 upload (adds `.gz` suffix) |
 | `config_s3_key` | No | `config/cluster_config.json` | S3 key for cluster config |
 | `dispatcher_schedule_minutes` | No | 5 | Dispatcher invocation interval |
 | `lambda_memory_mb` | No | 512 | Worker Lambda memory (MB) |
@@ -186,13 +187,22 @@ All queries auto-detect the timestamp format (Aurora microsecond Unix vs RDS MyS
 ## S3 Path Structure
 
 ```
-s3://<bucket>/audit-logs/{cluster_id}/{YYYY/MM/DD}/{instance_id}/{log_filename}
+s3://<bucket>/audit-logs/{cluster_id}/{YYYY/MM/DD}/{instance_id}/{log_filename}.gz
 ```
+
+Logs are gzip-compressed by default (`.gz` suffix; typically 8–12× smaller for
+audit text). Athena's `TextInputFormat` auto-decompresses `.gz` files by
+extension, so the Glue table, SerDe, and saved queries are unchanged.
+Compressed objects coexist with pre-existing uncompressed `.log` objects in the
+same location — no migration of historical data is required. Set
+`compress_logs: false` in `cdk.context.json` to disable (objects keep their
+original name with no suffix).
 
 ## Key Design Decisions
 
 - **No VPC attachment** — Lambda calls RDS management plane APIs (`rds.<region>.amazonaws.com`), not database endpoints. Works without VPC connectivity.
 - **No CloudWatch Logs export** — Avoids `$0.67/GB` CW Logs ingestion cost. Logs go directly from RDS API to S3.
+- **gzip compression** — Logs are compressed in-memory (Python stdlib, no extra dependency) before upload, cutting S3 storage and Athena scan cost. The `.gz` suffix is auto-decompressed by Athena, so queries are unaffected and historical uncompressed files still work.
 - **Fault isolation** — Each Worker invocation is independent. One cluster failure doesn't affect others.
 - **Config preservation** — Discovery preserves manually set `enabled: false` flags when updating the config.
 

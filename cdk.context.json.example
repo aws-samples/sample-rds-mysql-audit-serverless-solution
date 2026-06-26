@@ -3,6 +3,7 @@
   "s3_bucket_name": "your-audit-logs-bucket",
   "lambda_memory_mb": 512,
   "lambda_timeout_seconds": 300,
+  "compress_logs": true,
   "config_s3_key": "config/cluster_config.json",
   "dispatcher_schedule_minutes": 5,
   "dispatcher_memory_mb": 256,
